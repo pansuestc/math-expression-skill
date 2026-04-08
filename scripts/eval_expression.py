@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -14,6 +15,38 @@ from typing import Any
 EXIT_OK = 0
 EXIT_DEPENDENCY = 3
 EXIT_EVALUATION = 4
+
+UNSAFE_SYMBOLS = (
+    "Import",
+    "Export",
+    "URLRead",
+    "URLExecute",
+    "URLFetch",
+    "URLSave",
+    "Run",
+    "RunProcess",
+    "StartProcess",
+    "Install",
+    "Get",
+    "Put",
+    "OpenRead",
+    "OpenWrite",
+    "Read",
+    "Write",
+    "ReadString",
+    "BinaryRead",
+    "BinaryWrite",
+    "DeleteFile",
+    "RenameFile",
+    "CopyFile",
+    "CreateFile",
+    "CreateDirectory",
+    "SetDirectory",
+    "ResetDirectory",
+    "SystemOpen",
+    "ExternalEvaluate",
+    "SocketConnect",
+)
 
 
 class DependencyError(RuntimeError):
@@ -67,6 +100,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Skip exact-vs-numeric consistency verification",
     )
+    parser.add_argument(
+        "--allow-unsafe",
+        action="store_true",
+        help=(
+            "Allow expressions containing filesystem/network/process symbols "
+            "(disabled by default for safety)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -90,6 +131,15 @@ def evaluate_with_timeout(session: Any, expr: Any, timeout: float) -> Any:
         except Exception:
             pass
         raise EvaluationTimeoutError(f"Evaluation exceeded timeout: {timeout}s") from exc
+
+
+def find_unsafe_symbols(expr_text: str) -> list[str]:
+    hits: list[str] = []
+    for symbol in UNSAFE_SYMBOLS:
+        pattern = rf"(?<![A-Za-z0-9$`]){re.escape(symbol)}(?![A-Za-z0-9$`])"
+        if re.search(pattern, expr_text):
+            hits.append(symbol)
+    return hits
 
 
 def render_input_form(session: Any, wlexpr: Any, expr_text: str, timeout: float) -> str:
@@ -145,6 +195,15 @@ def verify_consistency(
 
 
 def build_payload(args: argparse.Namespace) -> ResultPayload:
+    if not args.allow_unsafe:
+        blocked = find_unsafe_symbols(args.expr)
+        if blocked:
+            blocked_text = ", ".join(sorted(set(blocked)))
+            raise EvaluationError(
+                "Expression blocked by safety policy (unsafe symbols detected): "
+                f"{blocked_text}. Use --allow-unsafe only in an isolated environment."
+            )
+
     kernel = shutil.which("WolframKernel")
     if not kernel:
         raise DependencyError("WolframKernel not found in PATH.")
